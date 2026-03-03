@@ -11,6 +11,7 @@ namespace UT_Utah_ParceliD.Services;
 public class UtUtahScraperService
 {
     const string StartUrl = "https://www.utahcounty.gov/LandRecords/Index.asp";
+    const int MaxRetries = 3;
 
     IPlaywright? _playwright;
     IBrowser? _browser;
@@ -23,174 +24,234 @@ public class UtUtahScraperService
         if (string.IsNullOrWhiteSpace(parcelId))
             throw new ArgumentException("Parcel ID is required.", nameof(parcelId));
 
+        await ApifyHelper.SetStatusMessageAsync("Starting UT-Utah-ParceliD scraper...");
+
         await InitBrowserAsync();
         _page = await _context!.NewPageAsync();
         _page.SetDefaultTimeout(30_000);
 
         try
         {
-            await _page.GotoAsync(StartUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-            await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+            await ExecuteWithRetryAsync("Searching parcel", async () =>
+            {
+                await _page.GotoAsync(StartUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+                await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
 
-            var serialSearchLink = _page.GetByRole(AriaRole.Link, new PageGetByRoleOptions { Name = "Serial Number Search" }).First;
-            await serialSearchLink.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
-            await serialSearchLink.ClickAsync();
-            await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+                var serialSearchLink = _page.GetByRole(AriaRole.Link, new PageGetByRoleOptions { Name = "Serial Number Search" }).First;
+                await serialSearchLink.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
+                await serialSearchLink.ClickAsync();
+                await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
 
-            var serialInput = _page.Locator("#av_serial");
-            await serialInput.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
-            await serialInput.FillAsync(parcelId);
+                var serialInput = _page.Locator("#av_serial");
+                await serialInput.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
+                await serialInput.FillAsync(parcelId);
 
-            var searchBtn = _page.Locator("input[name='Submit'][type='submit'][value='Search']");
-            await searchBtn.ClickAsync();
-            await _page.WaitForLoadStateAsync(LoadState.NetworkIdle);
-            await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
-            await Task.Delay(1500);
+                var searchBtn = _page.Locator("input[name='Submit'][type='submit'][value='Search']");
+                await searchBtn.ClickAsync();
+                await _page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+                await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+                await Task.Delay(1500);
+            });
 
-            var jumpMenu = _page.GetByRole(AriaRole.Cell, new PageGetByRoleOptions { Name = parcelId, Exact = true }).Locator("select#jumpMenu");
-            await jumpMenu.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
-            await Task.WhenAll(
-                _page.WaitForURLAsync("**/Abstract.asp*", new PageWaitForURLOptions { Timeout = 15_000 }),
-                jumpMenu.SelectOptionAsync(new SelectOptionValue { Label = "Abstract" })
-            );
-            await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
-            await Task.Delay(1000);
+            await ApifyHelper.SetStatusMessageAsync("Loading Abstract page...");
+
+            await ExecuteWithRetryAsync("Selecting Abstract", async () =>
+            {
+                var jumpMenu = _page.GetByRole(AriaRole.Cell, new PageGetByRoleOptions { Name = parcelId, Exact = true }).Locator("select#jumpMenu");
+                await jumpMenu.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
+                await Task.WhenAll(
+                    _page.WaitForURLAsync("**/Abstract.asp*", new PageWaitForURLOptions { Timeout = 15_000 }),
+                    jumpMenu.SelectOptionAsync(new SelectOptionValue { Label = "Abstract" })
+                );
+                await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+                await Task.Delay(1000);
+            });
 
             var record = new UtUtahParcelRecord();
-            try
+            await ExtractAbstractFieldsAsync(record);
+            await ApifyHelper.SetStatusMessageAsync("Loading Property Info page...");
+
+            await ExecuteWithRetryAsync("Navigating to Property Info", async () =>
             {
-                record.OwnerName = (await _page.Locator("xpath=//td[contains(.,'Owner Name:')]/following-sibling::td[1]").First.TextContentAsync())?.Trim() ?? "";
-                record.PropertyAddress = (await _page.Locator("xpath=//td[contains(.,'Property Address:')]/following-sibling::td[1]").First.TextContentAsync())?.Trim() ?? "";
-                record.MailingAddress = (await _page.Locator("xpath=//td[contains(.,'Mailing Address:')]/following-sibling::td[1]").First.TextContentAsync())?.Trim() ?? "";
-                record.TaxingDescription = (await _page.Locator("xpath=//td[contains(.,'Taxing Description')]/following-sibling::td[1]").First.TextContentAsync())?.Trim() ?? "";
-                Console.WriteLine($"OwnerName: {record.OwnerName}");
-                Console.WriteLine($"PropertyAddress: {record.PropertyAddress}");
-                Console.WriteLine($"MailingAddress: {record.MailingAddress}");
-                Console.WriteLine($"TaxingDescription: {record.TaxingDescription}");
-            }
-            catch { }
+                var abstractJumpMenu = _page.Locator("select#jumpMenu").First;
+                await abstractJumpMenu.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
+                await Task.WhenAll(
+                    _page.WaitForURLAsync("**/Property.asp*", new PageWaitForURLOptions { Timeout = 15_000, WaitUntil = WaitUntilState.DOMContentLoaded }),
+                    abstractJumpMenu.SelectOptionAsync(new SelectOptionValue { Label = "Property Info" })
+                );
+                await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+                await Task.Delay(1000);
+            });
 
-            var abstractJumpMenu = _page.Locator("select#jumpMenu").First;
-            await abstractJumpMenu.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
-            await Task.WhenAll(
-                _page.WaitForURLAsync("**/Property.asp*", new PageWaitForURLOptions { Timeout = 15_000, WaitUntil = WaitUntilState.DOMContentLoaded }),
-                abstractJumpMenu.SelectOptionAsync(new SelectOptionValue { Label = "Property Info" })
-            );
-            await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
-            await Task.Delay(1000);
+            await ApifyHelper.SetStatusMessageAsync("Extracting Property Info...");
+            await ExtractAcreageAsync(record);
+            await ExtractOwnerNamesTabAsync(record);
+            await ExtractDocumentsTabAsync(record);
+            await ExtractAddrsTabAsync(record);
 
-            try
-            {
-                var acreageTd = _page.Locator("xpath=//td[@colspan='3'][.//strong[contains(.,'Acreage')]]").First;
-                var acreageText = (await acreageTd.TextContentAsync()) ?? "";
-                var m = Regex.Match(acreageText, @"[\d.]+");
-                record.Acreage = m.Success ? m.Value : acreageText.Replace("Acreage:", "").Replace("\u00A0", " ").Trim();
-                Console.WriteLine($"Acreage: {record.Acreage}");
-            }
-            catch { }
+            await ApifyHelper.SetStatusMessageAsync("Loading Serial History...");
+            await ExtractSerialHistoryAsync(record);
 
-            try
-            {
-                var ownerNamesTab = _page.Locator("li.TabbedPanelsTab").Filter(new LocatorFilterOptions { HasText = "Owner Names" }).First;
-                await ownerNamesTab.ClickAsync();
-                await Task.Delay(500);
-                var ownerPanel = _page.Locator("div.TabbedPanelsContentVisible").First;
-                var ownerRows = ownerPanel.Locator("tr:has(td a[href*='namesearch'])");
-                var rowCount = await ownerRows.CountAsync();
-                for (var r = 0; r < rowCount; r++)
-                {
-                    var row = ownerRows.Nth(r);
-                    var tds = row.Locator("td");
-                    var yearText = (await tds.Nth(0).TextContentAsync())?.Trim() ?? "";
-                    var ownerText = (await tds.Nth(2).Locator("a").First.TextContentAsync())?.Trim() ?? "";
-                    if (!string.IsNullOrWhiteSpace(yearText)) record.Years.Add(yearText);
-                    if (!string.IsNullOrWhiteSpace(ownerText)) record.OwnerNames.Add(ownerText);
-                }
-                Console.WriteLine($"Years: {string.Join("; ", record.Years)}");
-                Console.WriteLine($"OwnerNames: {string.Join("; ", record.OwnerNames)}");
-            }
-            catch { }
-
-            try
-            {
-                var documentsTab = _page.Locator("li.TabbedPanelsTab").Filter(new LocatorFilterOptions { HasText = "Documents" }).First;
-                await documentsTab.ClickAsync();
-                await Task.Delay(500);
-                var docPanel = _page.Locator("div.TabbedPanelsContentVisible").First;
-                var docRows = docPanel.Locator("tr:has(td em a[href*='Document.asp'])");
-                var docRowCount = await docRows.CountAsync();
-                for (var r = 0; r < docRowCount; r++)
-                {
-                    var row = docRows.Nth(r);
-                    var entryLink = row.Locator("td").First.Locator("em a").First;
-                    var entryText = (await entryLink.TextContentAsync())?.Trim() ?? "";
-                    if (!string.IsNullOrWhiteSpace(entryText)) record.EntryNumbers.Add(entryText);
-                }
-                Console.WriteLine($"EntryNumbers: {string.Join("; ", record.EntryNumbers)}");
-            }
-            catch { }
-
-            try
-            {
-                var addrsTab = _page.Locator("li.TabbedPanelsTab").Filter(new LocatorFilterOptions { HasText = "Addrs" }).First;
-                await addrsTab.ClickAsync();
-                await Task.Delay(500);
-                var addrsPanel = _page.Locator("div.TabbedPanelsContentVisible").First;
-                var emTags = addrsPanel.Locator("em");
-                var emCount = await emTags.CountAsync();
-                for (var i = 0; i < emCount; i++)
-                {
-                    var text = (await emTags.Nth(i).TextContentAsync())?.Replace("\r", "").Replace("\n", " ").Trim() ?? "";
-                    if (!string.IsNullOrWhiteSpace(text)) record.Addresses.Add(text);
-                }
-                Console.WriteLine($"Addresses: {string.Join("; ", record.Addresses)}");
-            }
-            catch { }
-
-            try
-            {
-                var navSelect = _page.Locator("form#page-changer select[name='nav']");
-                await navSelect.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
-                var optValue = await navSelect.Locator("option:has-text('Serial History')").First.GetAttributeAsync("value");
-                if (!string.IsNullOrWhiteSpace(optValue))
-                {
-                    var baseUri = new Uri(_page.Url);
-                    var targetUrl = optValue.StartsWith("http", StringComparison.OrdinalIgnoreCase)
-                        ? optValue
-                        : new Uri(baseUri, optValue).ToString();
-                    await _page.GotoAsync(targetUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-                    await Task.Delay(1000);
-                }
-
-                var historyRows = _page.Locator("xpath=//h1[contains(.,'Serial History')]/following-sibling::table//td[@valign='top']/table/tbody/tr[.//a[contains(@href,'Document')]]");
-                var rowCount = await historyRows.CountAsync();
-                for (var r = 0; r < rowCount; r++)
-                {
-                    var row = historyRows.Nth(r);
-                    var docLink = row.Locator("td").First.Locator("a[href*='Document']");
-                    var parentLink = row.Locator("td").Nth(2).Locator("a[href*='SerialHistory']");
-                    if (await docLink.CountAsync() > 0)
-                    {
-                        var docNum = (await docLink.First.TextContentAsync())?.Trim() ?? "";
-                        if (!string.IsNullOrWhiteSpace(docNum)) record.DocumentNumbers.Add(docNum);
-                    }
-                    if (await parentLink.CountAsync() > 0)
-                    {
-                        var parentId = (await parentLink.First.TextContentAsync())?.Trim() ?? "";
-                        if (!string.IsNullOrWhiteSpace(parentId)) record.ParentParcelIDs.Add(parentId);
-                    }
-                }
-                Console.WriteLine($"DocumentNumbers: {string.Join("; ", record.DocumentNumbers)}");
-                Console.WriteLine($"ParentParcelIDs: {string.Join("; ", record.ParentParcelIDs)}");
-            }
-            catch { }
-
+            await ApifyHelper.SetStatusMessageAsync($"Finished. Scrape completed successfully for parcel {parcelId}.", isTerminal: true);
+            Console.WriteLine($"Scrape completed successfully for parcel {parcelId}.");
             return record;
+        }
+        catch (Exception ex)
+        {
+            await ApifyHelper.SetStatusMessageAsync($"Error: {ex.Message}", isTerminal: true);
+            throw;
         }
         finally
         {
             await StopAsync();
         }
+    }
+
+    static async Task ExecuteWithRetryAsync(string statusPrefix, Func<Task> action)
+    {
+        for (var attempt = 1; attempt <= MaxRetries; attempt++)
+        {
+            try
+            {
+                if (attempt > 1)
+                    await ApifyHelper.SetStatusMessageAsync($"{statusPrefix} (retry {attempt}/{MaxRetries})");
+                await action();
+                return;
+            }
+            catch (Exception)
+            {
+                if (attempt == MaxRetries) throw;
+                await Task.Delay(2000 * attempt);
+            }
+        }
+    }
+
+    async Task ExtractAbstractFieldsAsync(UtUtahParcelRecord record)
+    {
+        try
+        {
+            record.OwnerName = (await _page!.Locator("xpath=//td[contains(.,'Owner Name:')]/following-sibling::td[1]").First.TextContentAsync())?.Trim() ?? "";
+            record.PropertyAddress = (await _page.Locator("xpath=//td[contains(.,'Property Address:')]/following-sibling::td[1]").First.TextContentAsync())?.Trim() ?? "";
+            record.MailingAddress = (await _page.Locator("xpath=//td[contains(.,'Mailing Address:')]/following-sibling::td[1]").First.TextContentAsync())?.Trim() ?? "";
+            record.TaxingDescription = (await _page.Locator("xpath=//td[contains(.,'Taxing Description')]/following-sibling::td[1]").First.TextContentAsync())?.Trim() ?? "";
+        }
+        catch { }
+    }
+
+    async Task ExtractAcreageAsync(UtUtahParcelRecord record)
+    {
+        try
+        {
+            var acreageTd = _page!.Locator("xpath=//td[@colspan='3'][.//strong[contains(.,'Acreage')]]").First;
+            var acreageText = (await acreageTd.TextContentAsync()) ?? "";
+            var m = Regex.Match(acreageText, @"[\d.]+");
+            record.Acreage = m.Success ? m.Value : acreageText.Replace("Acreage:", "").Replace("\u00A0", " ").Trim();
+        }
+        catch { }
+    }
+
+    async Task ExtractOwnerNamesTabAsync(UtUtahParcelRecord record)
+    {
+        try
+        {
+            var ownerNamesTab = _page!.Locator("li.TabbedPanelsTab").Filter(new LocatorFilterOptions { HasText = "Owner Names" }).First;
+            await ownerNamesTab.ClickAsync();
+            await Task.Delay(500);
+            var ownerPanel = _page.Locator("div.TabbedPanelsContentVisible").First;
+            var ownerRows = ownerPanel.Locator("tr:has(td a[href*='namesearch'])");
+            var rowCount = await ownerRows.CountAsync();
+            for (var r = 0; r < rowCount; r++)
+            {
+                var row = ownerRows.Nth(r);
+                var tds = row.Locator("td");
+                var yearText = (await tds.Nth(0).TextContentAsync())?.Trim() ?? "";
+                var ownerText = (await tds.Nth(2).Locator("a").First.TextContentAsync())?.Trim() ?? "";
+                if (!string.IsNullOrWhiteSpace(yearText)) record.Years.Add(yearText);
+                if (!string.IsNullOrWhiteSpace(ownerText)) record.OwnerNames.Add(ownerText);
+            }
+        }
+        catch { }
+    }
+
+    async Task ExtractDocumentsTabAsync(UtUtahParcelRecord record)
+    {
+        try
+        {
+            var documentsTab = _page!.Locator("li.TabbedPanelsTab").Filter(new LocatorFilterOptions { HasText = "Documents" }).First;
+            await documentsTab.ClickAsync();
+            await Task.Delay(500);
+            var docPanel = _page.Locator("div.TabbedPanelsContentVisible").First;
+            var docRows = docPanel.Locator("tr:has(td em a[href*='Document.asp'])");
+            var docRowCount = await docRows.CountAsync();
+            for (var r = 0; r < docRowCount; r++)
+            {
+                var row = docRows.Nth(r);
+                var entryLink = row.Locator("td").First.Locator("em a").First;
+                var entryText = (await entryLink.TextContentAsync())?.Trim() ?? "";
+                if (!string.IsNullOrWhiteSpace(entryText)) record.EntryNumbers.Add(entryText);
+            }
+        }
+        catch { }
+    }
+
+    async Task ExtractAddrsTabAsync(UtUtahParcelRecord record)
+    {
+        try
+        {
+            var addrsTab = _page!.Locator("li.TabbedPanelsTab").Filter(new LocatorFilterOptions { HasText = "Addrs" }).First;
+            await addrsTab.ClickAsync();
+            await Task.Delay(500);
+            var addrsPanel = _page.Locator("div.TabbedPanelsContentVisible").First;
+            var emTags = addrsPanel.Locator("em");
+            var emCount = await emTags.CountAsync();
+            for (var i = 0; i < emCount; i++)
+            {
+                var text = (await emTags.Nth(i).TextContentAsync())?.Replace("\r", "").Replace("\n", " ").Trim() ?? "";
+                if (!string.IsNullOrWhiteSpace(text)) record.Addresses.Add(text);
+            }
+        }
+        catch { }
+    }
+
+    async Task ExtractSerialHistoryAsync(UtUtahParcelRecord record)
+    {
+        try
+        {
+            var navSelect = _page!.Locator("form#page-changer select[name='nav']");
+            await navSelect.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
+            var optValue = await navSelect.Locator("option:has-text('Serial History')").First.GetAttributeAsync("value");
+            if (string.IsNullOrWhiteSpace(optValue)) return;
+
+            await ExecuteWithRetryAsync("Navigating to Serial History", async () =>
+            {
+                var baseUri = new Uri(_page.Url);
+                var targetUrl = optValue.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+                    ? optValue
+                    : new Uri(baseUri, optValue).ToString();
+                await _page.GotoAsync(targetUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+                await Task.Delay(1000);
+            });
+
+            var historyRows = _page.Locator("xpath=//h1[contains(.,'Serial History')]/following-sibling::table//td[@valign='top']/table/tbody/tr[.//a[contains(@href,'Document')]]");
+            var rowCount = await historyRows.CountAsync();
+            for (var r = 0; r < rowCount; r++)
+            {
+                var row = historyRows.Nth(r);
+                var docLink = row.Locator("td").First.Locator("a[href*='Document']");
+                var parentLink = row.Locator("td").Nth(2).Locator("a[href*='SerialHistory']");
+                if (await docLink.CountAsync() > 0)
+                {
+                    var docNum = (await docLink.First.TextContentAsync())?.Trim() ?? "";
+                    if (!string.IsNullOrWhiteSpace(docNum)) record.DocumentNumbers.Add(docNum);
+                }
+                if (await parentLink.CountAsync() > 0)
+                {
+                    var parentId = (await parentLink.First.TextContentAsync())?.Trim() ?? "";
+                    if (!string.IsNullOrWhiteSpace(parentId)) record.ParentParcelIDs.Add(parentId);
+                }
+            }
+        }
+        catch { }
     }
 
     /// <summary>Initializes browser and context for Apify (headless) or local run.</summary>

@@ -27,7 +27,9 @@ var parcelId = !string.IsNullOrWhiteSpace(config.ParcelId) ? config.ParcelId : "
 try
 {
     var record = await service.ScrapeParcelAsync(parcelId);
+    await ApifyHelper.SetStatusMessageAsync("Pushing to Dataset...");
     await ApifyHelper.PushSingleDataAsync(record);
+    Console.WriteLine($"Data pushed to Dataset successfully for parcel {parcelId}.");
     if (!isApify)
     {
         Console.WriteLine("Press Enter to exit...");
@@ -36,7 +38,7 @@ try
 }
 catch (Exception ex)
 {
-    Console.WriteLine($"Error: {ex.Message}");
+    await ApifyHelper.SetStatusMessageAsync($"Error: {ex.Message}", isTerminal: true);
     if (!isApify)
     {
         Console.WriteLine("Press Enter to exit...");
