@@ -7,7 +7,7 @@ namespace UT_Utah_ParceliD.Models;
 public class InputConfig
 {
     /// <summary>
-    /// Parcel ID to scrape (e.g. 35:840:0124).
+    /// Parcel ID(s) to scrape, comma-separated (e.g. 35:840:0124 or 35:840:0124,35:840:0125).
     /// </summary>
     public string ParcelId { get; set; } = "";
 }

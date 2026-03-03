@@ -5,7 +5,7 @@ namespace UT_Utah_ParceliD.Models;
 /// </summary>
 public class UtUtahParcelRecord
 {
-    // String (single value)
+    public string ParcelId { get; set; } = "";
     public string OwnerName { get; set; } = "";
     public string PropertyAddress { get; set; } = "";
     public string MailingAddress { get; set; } = "";

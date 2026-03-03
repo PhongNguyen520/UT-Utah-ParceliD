@@ -18,38 +18,45 @@ public class UtUtahScraperService
     IBrowserContext? _context;
     IPage? _page;
 
-    /// <summary>Scrapes parcel data for the given parcel ID.</summary>
+    /// <summary>Initializes browser and context once. Must be called before ScrapeParcelAsync.</summary>
+    public async Task InitAsync()
+    {
+        if (_context != null) return;
+        await InitBrowserAsync();
+    }
+
+    /// <summary>Scrapes parcel data for the given parcel ID. Requires InitAsync to have been called. Opens a new tab, scrapes, then closes the tab.</summary>
     public async Task<UtUtahParcelRecord> ScrapeParcelAsync(string parcelId)
     {
         if (string.IsNullOrWhiteSpace(parcelId))
             throw new ArgumentException("Parcel ID is required.", nameof(parcelId));
+        if (_context == null)
+            throw new InvalidOperationException("InitAsync must be called before ScrapeParcelAsync.");
 
-        await ApifyHelper.SetStatusMessageAsync("Starting UT-Utah-ParceliD scraper...");
-
-        await InitBrowserAsync();
-        _page = await _context!.NewPageAsync();
-        _page.SetDefaultTimeout(30_000);
+        var page = await _context.NewPageAsync();
+        page.SetDefaultTimeout(30_000);
 
         try
         {
+            _page = page;
             await ExecuteWithRetryAsync("Searching parcel", async () =>
             {
-                await _page.GotoAsync(StartUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
-                await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+                await page.GotoAsync(StartUrl, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+                await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
 
-                var serialSearchLink = _page.GetByRole(AriaRole.Link, new PageGetByRoleOptions { Name = "Serial Number Search" }).First;
+                var serialSearchLink = page.GetByRole(AriaRole.Link, new PageGetByRoleOptions { Name = "Serial Number Search" }).First;
                 await serialSearchLink.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
                 await serialSearchLink.ClickAsync();
-                await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+                await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
 
-                var serialInput = _page.Locator("#av_serial");
+                var serialInput = page.Locator("#av_serial");
                 await serialInput.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
                 await serialInput.FillAsync(parcelId);
 
-                var searchBtn = _page.Locator("input[name='Submit'][type='submit'][value='Search']");
+                var searchBtn = page.Locator("input[name='Submit'][type='submit'][value='Search']");
                 await searchBtn.ClickAsync();
-                await _page.WaitForLoadStateAsync(LoadState.NetworkIdle);
-                await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+                await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+                await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
                 await Task.Delay(1500);
             });
 
@@ -57,29 +64,33 @@ public class UtUtahScraperService
 
             await ExecuteWithRetryAsync("Selecting Abstract", async () =>
             {
-                var jumpMenu = _page.GetByRole(AriaRole.Cell, new PageGetByRoleOptions { Name = parcelId, Exact = true }).Locator("select#jumpMenu");
+                var cell = page.GetByRole(AriaRole.Cell, new PageGetByRoleOptions { Name = parcelId, Exact = true });
+                if (await cell.CountAsync() == 0)
+                    throw new InvalidParcelIdException(parcelId);
+
+                var jumpMenu = cell.Locator("select#jumpMenu");
                 await jumpMenu.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
                 await Task.WhenAll(
-                    _page.WaitForURLAsync("**/Abstract.asp*", new PageWaitForURLOptions { Timeout = 15_000 }),
+                    page.WaitForURLAsync("**/Abstract.asp*", new PageWaitForURLOptions { Timeout = 15_000 }),
                     jumpMenu.SelectOptionAsync(new SelectOptionValue { Label = "Abstract" })
                 );
-                await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+                await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
                 await Task.Delay(1000);
             });
 
-            var record = new UtUtahParcelRecord();
+            var record = new UtUtahParcelRecord { ParcelId = parcelId };
             await ExtractAbstractFieldsAsync(record);
             await ApifyHelper.SetStatusMessageAsync("Loading Property Info page...");
 
             await ExecuteWithRetryAsync("Navigating to Property Info", async () =>
             {
-                var abstractJumpMenu = _page.Locator("select#jumpMenu").First;
+                var abstractJumpMenu = page.Locator("select#jumpMenu").First;
                 await abstractJumpMenu.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
                 await Task.WhenAll(
-                    _page.WaitForURLAsync("**/Property.asp*", new PageWaitForURLOptions { Timeout = 15_000, WaitUntil = WaitUntilState.DOMContentLoaded }),
+                    page.WaitForURLAsync("**/Property.asp*", new PageWaitForURLOptions { Timeout = 15_000, WaitUntil = WaitUntilState.DOMContentLoaded }),
                     abstractJumpMenu.SelectOptionAsync(new SelectOptionValue { Label = "Property Info" })
                 );
-                await _page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+                await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
                 await Task.Delay(1000);
             });
 
@@ -92,7 +103,7 @@ public class UtUtahScraperService
             await ApifyHelper.SetStatusMessageAsync("Loading Serial History...");
             await ExtractSerialHistoryAsync(record);
 
-            await ApifyHelper.SetStatusMessageAsync($"Finished. Scrape completed successfully for parcel {parcelId}.", isTerminal: true);
+            await ApifyHelper.SetStatusMessageAsync($"Scrape completed successfully for parcel {parcelId}.");
             Console.WriteLine($"Scrape completed successfully for parcel {parcelId}.");
             return record;
         }
@@ -103,7 +114,8 @@ public class UtUtahScraperService
         }
         finally
         {
-            await StopAsync();
+            _page = null;
+            try { await page.CloseAsync(); } catch { }
         }
     }
 
@@ -117,6 +129,10 @@ public class UtUtahScraperService
                     await ApifyHelper.SetStatusMessageAsync($"{statusPrefix} (retry {attempt}/{MaxRetries})");
                 await action();
                 return;
+            }
+            catch (InvalidParcelIdException)
+            {
+                throw;
             }
             catch (Exception)
             {
