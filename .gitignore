@@ -1,0 +1,33 @@
+# Build outputs
+bin/
+obj/
+out/
+
+# IDE
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+project.lock.json
+
+# Playwright
+.playwright/
+playwright-report/
+test-results/
+
+# Local Apify storage
+apify_storage/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+*.log
+*.tmp
